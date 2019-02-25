@@ -64,12 +64,8 @@ function Stage(opts) {
   this._renderers = [];
 
   // The set of visible tiles, populated during render().
+  // TODO: Improve the description, as this includes parent tiles.
   this._visibleTiles = [];
-
-  // The sets of fallback tiles, populated during render().
-  // Fallback tiles are used when a visible tile's own texture is unavailable.
-  this._parentTiles = [];
-  this._childrenTiles = [];
 
   // Temporary variable for tiles.
   this._tmpTiles = [];
@@ -388,8 +384,6 @@ Stage.prototype.render = function() {
   var i;
 
   var visibleTiles = this._visibleTiles;
-  var parentTiles = this._parentTiles;
-  var childrenTiles = this._childrenTiles;
 
   var stableStage = true;
   var stableLayer;
@@ -420,6 +414,9 @@ Stage.prototype.render = function() {
     var renderer = this._updateRenderer(i);
     var depth = this._layers.length - i;
     var textureStore = layer.textureStore();
+    var tile;
+    var texture;
+    var j;
 
     // Convert the rect effect into a normalized rect.
     // TODO: avoid doing this on every frame.
@@ -437,11 +434,6 @@ Stage.prototype.render = function() {
 
     // Clear the tile sets.
     visibleTiles.length = 0;
-    childrenTiles.length = 0;
-    parentTiles.length = 0;
-
-    // Get the visible tiles for the current layer.
-    layer.visibleTiles(visibleTiles);
 
     // Signal start of layer to the renderer.
     renderer.startLayer(layer, rect);
@@ -464,29 +456,33 @@ Stage.prototype.render = function() {
     //   2) render higher-res fallback tiles before lower-res ones;
     //   3) render lower-res fallback tiles in descending resolution order.
 
-    // Render the visible tiles for which a texture is available, and collect
-    // fallback tiles otherwise.
-    stableLayer = this._renderTiles(
-        visibleTiles, textureStore, renderer, layer, depth,
-        childrenTiles, parentTiles);
+    // TODO: Fix the above explanation, as progressive rendering does away with
+    // children fallbacks.
+
+    stableLayer = this._collectTiles(layer, textureStore, visibleTiles);
+
+    // Render all the tiles that have a texture.
+    // TODO: This renders more than necessary; omit parents already covered by
+    // children.
+    for (j = 0; j < visibleTiles.length; j++) {
+      tile = visibleTiles[j];
+      texture = textureStore.texture(tile);
+      if (texture) {
+        renderer.renderTile(tile, texture, layer, depth);
+      }
+    }
+
+    // Mark tiles in reverse render order (parents before children) so that
+    // they are loaded in that order (progressive loading).
+    for (j = visibleTiles.length - 1; j >= 0; j--) {
+      tile = visibleTiles[j];
+      textureStore.markTile(tile);
+    }
 
     layer.emit('renderComplete', stableLayer);
     if (!stableLayer) {
       stableStage = false;
     }
-
-    // Render the children (higher-res) fallback tiles.
-    // We never collect children fallbacks from multiple resolution levels, so
-    // they may be rendered in any order.
-    this._renderTiles(
-      childrenTiles, textureStore, renderer, layer, depth, null, null);
-
-    // Render the parent (lower-res) fallback tiles.
-    // We may collect parent fallbacks from multiple resolution levels, so they
-    // must be rendered in descending resolution order.
-    parentTiles.sort(reverseTileCmp);
-    this._renderTiles(
-        parentTiles, textureStore, renderer, layer, depth, null, null);
 
     // Signal end of layer to the renderer.
     renderer.endLayer(layer, rect);
@@ -531,108 +527,38 @@ Stage.prototype._updateRenderer = function(layerIndex) {
 };
 
 
-// Renders the given tiles and optionally collects fallbacks when textures are
-// unavailable. Returns whether all the (non-fallback) textures were available.
-Stage.prototype._renderTiles = function(
-    tiles, textureStore, renderer, layer, depth, childrenTiles, parentTiles) {
-  if ((childrenTiles == null) != (parentTiles == null)) {
-    throw new Error('Inconsistent fallback arguments');
-  }
+// Collects visible tiles and their recursive parents.
+// Produces a list of tiles in render order (child before parent).
+// Returns whether all non-parent textures are available.
+Stage.prototype._collectTiles = function(layer, textureStore, result) {
+  var tmpTiles = this._tmpTiles;
+  tmpTiles.length = 0;
 
-  var allTextures = true;
-  for (var tileIndex = 0; tileIndex < tiles.length; tileIndex++) {
-    var tile = tiles[tileIndex];
+  layer.visibleTiles(tmpTiles);
 
-    // Mark tile as visible in this frame. This forces a texture refresh.
-    textureStore.markTile(tile);
+  var isStable = true;
 
-    // If there is a texture for the tile, send the pair into the renderer.
-    // Otherwise, if we are collecting fallbacks, try to get one.
-    var texture = textureStore.texture(tile);
-    if (texture) {
-      renderer.renderTile(tile, texture, layer, depth, tileIndex);
-    } else {
-      allTextures = false;
-      if (childrenTiles != null || parentTiles != null) {
-        this._collectFallbacks(tile, textureStore, childrenTiles, parentTiles);
-      }
+  for (var i = 0; i < tmpTiles.length; i++) {
+    var tile = tmpTiles[i];
+    if (!textureStore.texture(tile)) {
+      isStable = false;
     }
-  }
-  return allTextures;
-};
-
-
-// Collects fallbacks for a tile.
-// Children fallbacks (higher resolution) are preferred to parent fallbacks
-// (lower resolution) when available.
-Stage.prototype._collectFallbacks = function(
-    tile, textureStore, childrenTiles, parentTiles) {
-  return (this._collectChildrenFallbacks(tile, textureStore, childrenTiles) ||
-          this._collectParentFallbacks(tile, textureStore, parentTiles));
-};
-
-
-// Collects parent fallbacks for a tile.
-Stage.prototype._collectParentFallbacks = function(tile, textureStore, result) {
-  // Find the closest parent with a loaded texture.
-  while ((tile = tile.parent()) != null) {
-    if (tile && textureStore.texture(tile)) {
+    do {
       // Make sure we do not add duplicate tiles.
-      for (var i = 0; i < result.length; i++) {
-        if (tile.equals(result[i])) {
-          // Use the already present parent as a fallback.
-          return true;
+      // TODO: Avoid O(n²).
+      for (var j = 0; j < result.length; j++) {
+        if (tile.equals(result[j])) {
+          continue;
         }
       }
-      // Use this parent as a fallback.
       result.push(tile);
-      return true;
-    }
-  }
-  // No parent fallback available.
-  return false;
-};
-
-
-// Collects children fallbacks for a tile.
-Stage.prototype._collectChildrenFallbacks = function(
-    tile, textureStore, result) {
-  // Recurse into children until a level with available textures is found.
-  // However, do not recurse any further when the number of children exceeds 1,
-  // event if we still haven't found a viable fallback; this prevents falling
-  // back on an exponential number of tiles.
-  //
-  // In practice, this means that equirectangular geometries (where there is
-  // a single tile per level) will fall back to any level, while cube/flat
-  // geometries (where the number of children typically, though not necessarily,
-  // doubles per level) will only fall back to the immediate next level.
-
-  var tmp = this._tmpTiles;
-  tmp.length = 0;
-
-  // If we are on the last level, there are no children to fall back to.
-  if (!tile.children(tmp)) {
-    return false;
+    } while ((tile = tile.parent()) != null);
   }
 
-  // If tile has a single child with no texture, recurse into next level.
-  if (tmp.length === 1 && !textureStore.texture(tmp[0])) {
-    return this._collectChildrenFallbacks(tmp[0], textureStore, result);
-  }
+  // Sort in render order.
+  result.sort(reverseTileCmp);
 
-  // Copy tiles into result set and check whether level is complete.
-  var incomplete = false;
-  for (var i = 0; i < tmp.length; i++) {
-    if (textureStore.texture(tmp[i])) {
-      result.push(tmp[i]);
-    } else {
-      incomplete = true;
-    }
-  }
-
-  // If at least one child texture is not available, we still need the parent
-  // fallback. A false return value indicates this.
-  return !incomplete;
+  return isStable;
 };
 
 
