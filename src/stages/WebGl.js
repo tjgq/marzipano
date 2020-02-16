@@ -26,8 +26,6 @@ var setAbsolute = require('../util/dom').setAbsolute;
 var setFullSize = require('../util/dom').setFullSize;
 var clearOwnProperties = require('../util/clearOwnProperties');
 
-var debug = typeof MARZIPANODEBUG !== 'undefined' && MARZIPANODEBUG.webGl;
-
 
 // Browser-specific workarounds.
 var browserQuirks = {
@@ -47,11 +45,6 @@ function initWebGlContext(canvas, opts) {
     preserveDrawingBuffer: !!(opts && opts.preserveDrawingBuffer)
   };
 
-  if (debug && typeof WebGLDebugUtils !== 'undefined') {
-    console.log('Using WebGL lost context simulator');
-    canvas = WebGLDebugUtils.makeLostContextSimulatingCanvas(canvas);
-  }
-
   // Keep support/WebGl.js in sync with this.
   var gl = (canvas.getContext) && (canvas.getContext('webgl', options) || canvas.getContext('experimental-webgl', options));
 
@@ -59,9 +52,8 @@ function initWebGlContext(canvas, opts) {
     throw new Error('Could not get WebGL context');
   }
 
-  if (debug && typeof WebGLDebugUtils !== "undefined") {
-    gl = WebGLDebugUtils.makeDebugContext(gl);
-    console.log('Using WebGL debug context');
+  if (opts.wrapContext) {
+    gl = opts.wrapContext(gl);
   }
 
   return gl;
@@ -78,6 +70,7 @@ function initWebGlContext(canvas, opts) {
  * @param {boolean} [opts.antialias=false]
  * @param {boolean} [opts.preserveDrawingBuffer=false]
  * @param {boolean} [opts.generateMipmaps=false]
+ * @param {function} [opts.wrapContext]
  *
  * The `antialias` and `preserveDrawingBuffer` options control the WebGL
  * context attributes of the same name. The `alpha` and `premultipliedAlpha`
@@ -91,6 +84,11 @@ function initWebGlContext(canvas, opts) {
  * Due to technical limitations, they are only generated for textures whose
  * dimensions are a power of two. See:
  * https://www.khronos.org/webgl/wiki/WebGL_and_OpenGL_Differences#Non-Power_of_Two_Texture_Support
+ *
+ * The `wrapContext` option is a function that receives and returns a
+ * WebGLRenderingContext. The stage will use its return value as the context.
+ * This is useful when used together with WebGLDebugUtils to debug WebGL issues.
+ * See https://www.khronos.org/webgl/wiki/Debugging.
  *
  * Also see the available {@link Stage} options.
  */
@@ -113,7 +111,7 @@ function WebGlStage(opts) {
 
   this._gl = initWebGlContext(this._domElement, opts);
 
-  this._handleContextLoss = function() {
+  this._handleContextLoss = function () {
     self.emit('webglcontextlost');
     self._gl = null;
   };
@@ -133,14 +131,14 @@ inherits(WebGlStage, Stage);
 /**
  * Destructor.
  */
-WebGlStage.prototype.destroy = function() {
+WebGlStage.prototype.destroy = function () {
   this._domElement.removeEventListener('webglcontextlost', this._handleContextLoss);
   // Delegate clearing own properties to the Stage destructor.
   this.constructor.super_.prototype.destroy.call(this);
 };
 
 
-WebGlStage.supported = function() {
+WebGlStage.supported = function () {
   return webGlSupported();
 };
 
@@ -150,7 +148,7 @@ WebGlStage.supported = function() {
  *
  * @return {Element}
  */
-WebGlStage.prototype.domElement = function() {
+WebGlStage.prototype.domElement = function () {
   return this._domElement;
 };
 
@@ -160,12 +158,12 @@ WebGlStage.prototype.domElement = function() {
  *
  * @return {WebGLRenderingContext }
  */
-WebGlStage.prototype.webGlContext = function() {
+WebGlStage.prototype.webGlContext = function () {
   return this._gl;
 };
 
 
-WebGlStage.prototype.setSizeForType = function() {
+WebGlStage.prototype.setSizeForType = function () {
   // Update the size of the canvas coordinate space.
   //
   // The size is obtained by taking the stage dimensions, which are set in CSS
@@ -181,17 +179,17 @@ WebGlStage.prototype.setSizeForType = function() {
 };
 
 
-WebGlStage.prototype.loadImage = function(url, rect, done) {
+WebGlStage.prototype.loadImage = function (url, rect, done) {
   return this._loader.loadImage(url, rect, done);
 };
 
 
-WebGlStage.prototype.maxTextureSize = function() {
+WebGlStage.prototype.maxTextureSize = function () {
   return this._gl.getParameter(this._gl.MAX_TEXTURE_SIZE);
 };
 
 
-WebGlStage.prototype.validateLayer = function(layer) {
+WebGlStage.prototype.validateLayer = function (layer) {
   var tileSize = layer.geometry().maxTileSize();
   var maxTextureSize = this.maxTextureSize();
   if (tileSize > maxTextureSize) {
@@ -200,7 +198,7 @@ WebGlStage.prototype.validateLayer = function(layer) {
 };
 
 
-WebGlStage.prototype.createRenderer = function(Renderer) {
+WebGlStage.prototype.createRenderer = function (Renderer) {
   var rendererInstances = this._rendererInstances;
   for (var i = 0; i < rendererInstances.length; i++) {
     if (rendererInstances[i] instanceof Renderer) {
@@ -213,7 +211,7 @@ WebGlStage.prototype.createRenderer = function(Renderer) {
 };
 
 
-WebGlStage.prototype.destroyRenderer = function(renderer) {
+WebGlStage.prototype.destroyRenderer = function (renderer) {
   var rendererInstances = this._rendererInstances;
   if (this._renderers.indexOf(renderer) < 0) {
     renderer.destroy();
@@ -225,7 +223,7 @@ WebGlStage.prototype.destroyRenderer = function(renderer) {
 };
 
 
-WebGlStage.prototype.startFrame = function() {
+WebGlStage.prototype.startFrame = function () {
 
   var gl = this._gl;
 
@@ -251,7 +249,7 @@ WebGlStage.prototype.startFrame = function() {
 };
 
 
-WebGlStage.prototype.endFrame = function() {};
+WebGlStage.prototype.endFrame = function () { };
 
 
 WebGlStage.prototype.takeSnapshot = function (options) {
@@ -278,7 +276,7 @@ WebGlStage.prototype.takeSnapshot = function (options) {
   this.render();
 
   // Return the snapshot
-  return this._domElement.toDataURL('image/jpeg',quality/100);
+  return this._domElement.toDataURL('image/jpeg', quality / 100);
 }
 
 
@@ -295,7 +293,7 @@ function WebGlTexture(stage, tile, asset) {
 }
 
 
-WebGlTexture.prototype.refresh = function(tile, asset) {
+WebGlTexture.prototype.refresh = function (tile, asset) {
 
   var gl = this._gl;
   var stage = this._stage;
@@ -389,7 +387,7 @@ WebGlTexture.prototype.refresh = function(tile, asset) {
 };
 
 
-WebGlTexture.prototype.destroy = function() {
+WebGlTexture.prototype.destroy = function () {
   if (this._texture) {
     this._gl.deleteTexture(this._texture);
   }
